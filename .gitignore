@@ -142,4 +142,8 @@ uv.lock
 # Ignore environment files
 .env
 
+# Ignore processing files
+jobs/
+*.db
+
 # End of file
