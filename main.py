@@ -1,76 +1,78 @@
+"""Main module for Actual Budget Normalizer API."""
+
 import json
 import logging
-import os
 import sqlite3
-import time
-from datetime import datetime
-from typing import Any, Dict, List
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import NamedTuple
 from uuid import uuid4
 
 import pandas as pd
-from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, UploadFile
+from fastapi import BackgroundTasks, FastAPI, HTTPException, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 from groq import Groq
 from pydantic import BaseModel
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from scalar_fastapi import get_scalar_api_reference
 
-# --- Logging Configuration ---
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-)
+# --- Logging ---
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("bank-normalizer")
-# Persist logs
-os.makedirs("jobs", exist_ok=True)
+Path("jobs").mkdir(parents=True, exist_ok=True)
 file_handler = logging.FileHandler("jobs/ai_processing.log")
 file_handler.setLevel(logging.INFO)
-file_handler.setFormatter(
-    logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-)
+file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
 logger.addHandler(file_handler)
 logger.propagate = False
 
 
 # --- Settings ---
 class Settings(BaseSettings):
+    """Application settings."""
+
     groq_api_key: str
     deepseek_model: str = "deepseek-r1-distill-llama-70b"
     deepseek_temperature: float = 0.6
     deepseek_max_completion_tokens: int = 4096
     deepseek_top_p: float = 0.95
     deepseek_stream: bool = True
-    deepseek_stop: List[str] | None = None
+    deepseek_stop: list[str] | None = None
     categories_file: str = "categories.json"
     payees_file: str = "payees.json"
     database_url: str = "jobs.db"
-    server_host: str = "0.0.0.0"
+    server_host: str = "127.0.0.1"  # safer default
     server_port: int = 8000
 
-    model_config = SettingsConfigDict(
-        env_file=".env", env_file_encoding="utf-8", extra="ignore"
-    )
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
 
-# --- FastAPI Dependencies ---
 def get_settings() -> Settings:
+    """Get application settings."""
     return Settings()
 
 
-def get_client(settings: Settings = Depends(get_settings)) -> Groq:
+def get_client(settings: Settings = None) -> Groq:
+    """Get Groq client."""
+    if settings is None:
+        settings = get_settings()
     return Groq(api_key=settings.groq_api_key)
 
 
-# --- FastAPI App ---
+# --- App and Docs ---
 app = FastAPI(docs_url=None, redoc_url=None, openapi_url="/openapi.json")
 
 
 @app.get("/scalar", include_in_schema=False)
-async def scalar_docs():
+async def scalar_docs() -> JSONResponse:
+    """Return Scalar API reference."""
     return get_scalar_api_reference(openapi_url=app.openapi_url, title=app.title)
 
 
-# --- Transaction Model ---
+# --- Models ---
 class Transaction(BaseModel):
+    """Transaction model."""
+
     date: str
     payee: str
     notes: str
@@ -78,14 +80,13 @@ class Transaction(BaseModel):
     amount: float
 
 
-# --- Database Initialization ---
+# --- DB Init ---
 @app.on_event("startup")
-def startup_db():
-    settings = get_settings()
-    with sqlite3.connect(settings.database_url) as conn:
+def startup_db() -> None:
+    """Initialize the jobs database."""
+    with sqlite3.connect(get_settings().database_url) as conn:
         conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS jobs (
+            """CREATE TABLE IF NOT EXISTS jobs (
                 id TEXT PRIMARY KEY,
                 status TEXT NOT NULL,
                 created_at TEXT NOT NULL,
@@ -93,179 +94,180 @@ def startup_db():
                 input_path TEXT NOT NULL,
                 output_path TEXT NOT NULL,
                 error TEXT
-            )
-            """
+            )"""
         )
 
 
-# --- Utility Functions ---
-def json_safe(value: Any) -> Any:
-    if hasattr(value, "isoformat"):
-        return value.isoformat()
-    return value
+def _raise_missing_key(key: str) -> None:
+    msg = f"Missing {key} in AI response"
+    raise ValueError(msg)
 
 
-def extract_json(raw: str) -> Dict[str, Any]:
-    if not raw or not raw.strip():
-        raise ValueError("AI response is empty, cannot extract JSON.")
-    decoder = json.JSONDecoder()
-    try:
-        obj, _ = decoder.raw_decode(raw)
-    except Exception as e:
-        logger.error(f"Failed to decode JSON from AI output: {raw}")
-        raise ValueError(f"Failed to decode JSON: {e}")
-    return obj
+class AIParseContext(NamedTuple):
+    """Context for AI row parsing.
+
+    Attributes:
+        row: The transaction row as a dict.
+        categories: List of known categories.
+        payees: List of known payees.
+        settings: Application settings.
+        client: Groq client instance.
+        max_retries: Maximum number of retries for AI call.
+        retry_delay: Delay between retries in seconds.
+
+    """
+
+    row: dict
+    categories: list
+    payees: list
+    settings: Settings
+    client: Groq
+    max_retries: int = 3
+    retry_delay: float = 2.0
 
 
-def validate_transaction_data(data: dict) -> dict:
-    required_keys = {"date", "payee", "notes", "category", "amount"}
-    missing = required_keys - data.keys()
-    if missing:
-        raise ValueError(f"AI response missing keys: {missing}")
-    return data
+# --- AI Parse Helper ---
+def ai_parse_row(ctx: AIParseContext) -> Transaction:
+    """Parse a row using AI, retrying if needed."""
+    import time
 
-
-# --- AI Parsing ---
-def ai_parse_row(
-    row: Dict[str, Any],
-    categories: List[str],
-    payees: List[str],
-    settings: Settings,
-    client: Groq,
-    max_retries: int = 3,
-    retry_delay: float = 2.0,
-) -> Transaction:
-    payload = {k: json_safe(v) for k, v in row.items()}
-    payload["existing_categories"] = categories
-    payload["existing_payees"] = payees
-
+    payload = dict(ctx.row)
+    payload["existing_categories"] = ctx.categories
+    payload["existing_payees"] = ctx.payees
     system_msg = {
         "role": "system",
         "content": (
-            "Parse bank transaction data. Return ONLY a valid CSV row with the columns: date,payee,notes,category,amount. "
-            "Do not include any explanations, thoughts, or extra text. Output must be a single CSV row."
+            "Parse bank transaction data. Return ONLY a valid CSV row with the columns: "
+            "date,payee,notes,category,amount. Do not include any explanations, thoughts, or extra text. "
+            "Output must be a single CSV row."
         ),
     }
     user_msg = {"role": "user", "content": json.dumps(payload)}
-
     last_exception = None
-    for attempt in range(1, max_retries + 1):
+    for _ in range(ctx.max_retries):
         try:
-            completion = client.chat.completions.create(
-                model=settings.deepseek_model,
+            completion = ctx.client.chat.completions.create(
+                model=ctx.settings.deepseek_model,
                 messages=[system_msg, user_msg],
-                temperature=settings.deepseek_temperature,
-                max_completion_tokens=settings.deepseek_max_completion_tokens,
-                top_p=settings.deepseek_top_p,
-                stream=settings.deepseek_stream,
-                stop=settings.deepseek_stop,
+                temperature=ctx.settings.deepseek_temperature,
+                max_completion_tokens=ctx.settings.deepseek_max_completion_tokens,
+                top_p=ctx.settings.deepseek_top_p,
+                stream=ctx.settings.deepseek_stream,
+                stop=ctx.settings.deepseek_stop,
             )
             raw_output = ""
             for chunk in completion:
                 text = chunk.choices[0].delta.content or ""
                 raw_output += text
-                logger.debug(f"AI chunk: {text}")
             logger.info(f"AI raw output: {raw_output}")
-            if not raw_output.strip():
-                raise ValueError("Empty AI response")
-            data = extract_json(raw_output)
+            data = json.loads(raw_output)
+            for k in ("date", "payee", "notes", "amount"):
+                if k not in data:
+                    _raise_missing_key(k)
             data["category"] = data.get("category") or ""
-            validate_transaction_data(data)
-            logger.info(f"AI parsed: {data}")
             return Transaction(**data)
-        except Exception as e:
-            logger.warning(f"AI parse attempt {attempt} failed: {e}")
-            last_exception = e
-            time.sleep(retry_delay)
-    # Fallback: return a default Transaction with error info in notes
-    logger.error(f"AI failed after {max_retries} attempts: {last_exception}")
-    fallback = {
-        "date": row.get("Data") or row.get("date") or "",
-        "payee": row.get("Identificador") or row.get("payee") or "",
-        "notes": f"AI parse failed: {last_exception}",
-        "category": "",
-        "amount": float(row.get("Valor") or row.get("amount") or 0),
-    }
-    return Transaction(**fallback)
+        except Exception as exc:
+            last_exception = exc
+            logger.warning("AI parse failed: %s", exc)
+            time.sleep(ctx.retry_delay)
+    logger.error("AI failed after retries: %s", last_exception)
+    return Transaction(
+        date=ctx.row.get("Data") or ctx.row.get("date") or "",
+        payee=ctx.row.get("Identificador") or ctx.row.get("payee") or "",
+        notes=f"AI parse failed: {last_exception}",
+        category="",
+        amount=float(ctx.row.get("Valor") or ctx.row.get("amount") or 0),
+    )
 
 
-# --- Background Job Runner ---
-def run_job(job_id: str, settings: Settings, client: Groq):
-    in_path = f"jobs/{job_id}.csv"
-    out_path = f"jobs/{job_id}_out.csv"
+# --- Job Worker ---
+def run_job(job_id: str, settings: Settings, client: Groq) -> None:
+    """Run a normalization job."""
+    in_path = Path(f"jobs/{job_id}.csv")
+    out_path = Path(f"jobs/{job_id}_out.csv")
     with sqlite3.connect(settings.database_url) as conn:
         cur = conn.cursor()
         cur.execute("UPDATE jobs SET status='in_progress' WHERE id=?", (job_id,))
         conn.commit()
         try:
-            df = pd.read_csv(in_path, parse_dates=["Data"], dayfirst=True)
-            cats = (
-                json.load(open(settings.categories_file))
-                if os.path.exists(settings.categories_file)
-                else []
-            )
-            pays = (
-                json.load(open(settings.payees_file))
-                if os.path.exists(settings.payees_file)
-                else []
-            )
-
+            data_frame = pd.read_csv(in_path, parse_dates=["Data"], dayfirst=True)
+            cats = []
+            pays = []
+            cats_path = Path(settings.categories_file)
+            pays_path = Path(settings.payees_file)
+            if cats_path.exists():
+                with cats_path.open() as f:
+                    cats = json.load(f)
+            if pays_path.exists():
+                with pays_path.open() as f:
+                    pays = json.load(f)
             results = []
-            for record in df.to_dict(orient="records"):
-                txn = ai_parse_row(record, cats, pays, settings, client)
+            for record in data_frame.to_dict(orient="records"):
+                ctx = AIParseContext(record, cats, pays, settings, client)
+                txn = ai_parse_row(ctx)
                 if txn.category and txn.category not in cats:
                     cats.append(txn.category)
                 if txn.payee and txn.payee not in pays:
                     pays.append(txn.payee)
                 results.append(txn.dict())
-
-            json.dump(cats, open(settings.categories_file, "w"), indent=2)
-            json.dump(pays, open(settings.payees_file, "w"), indent=2)
+            with cats_path.open("w") as f:
+                json.dump(cats, f, indent=2)
+            with pays_path.open("w") as f:
+                json.dump(pays, f, indent=2)
             pd.DataFrame(results).to_csv(out_path, index=False)
-
             cur.execute(
                 "UPDATE jobs SET status='completed', completed_at=? WHERE id=?",
-                (datetime.utcnow().isoformat(), job_id),
+                (datetime.now(UTC).isoformat(), job_id),
             )
-        except Exception as e:
-            logger.exception(f"Job {job_id} failed")
+        except Exception as exc:
+            logger.exception("Job %s failed", job_id)
             cur.execute(
                 "UPDATE jobs SET status='error', completed_at=?, error=? WHERE id=?",
-                (datetime.utcnow().isoformat(), str(e), job_id),
+                (datetime.now(UTC).isoformat(), str(exc), job_id),
             )
         conn.commit()
 
 
-# --- Routes ---
+# --- Endpoints ---
 @app.post("/upload-csv", status_code=202)
 async def upload_csv(
     background_tasks: BackgroundTasks,
-    file: UploadFile = File(...),
-    settings: Settings = Depends(get_settings),
-    client: Groq = Depends(get_client),
+    file: UploadFile = None,
+    settings: Settings = None,
+    client: Groq = None,
 ) -> JSONResponse:
+    """Upload a CSV file and start a normalization job."""
+    if file is None:
+        from fastapi import File
+
+        file = File(...)
+    if settings is None:
+        settings = get_settings()
+    if client is None:
+        client = get_client(settings)
     if not file.filename.lower().endswith(".csv"):
         raise HTTPException(400, "Only CSV files accepted")
     data = await file.read()
     job_id = str(uuid4())
-    in_path = f"jobs/{job_id}.csv"
-    out_path = f"jobs/{job_id}_out.csv"
-    with open(in_path, "wb") as f:
+    in_path = Path(f"jobs/{job_id}.csv")
+    out_path = Path(f"jobs/{job_id}_out.csv")
+    with in_path.open("wb") as f:
         f.write(data)
-
     with sqlite3.connect(settings.database_url) as conn:
         conn.execute(
             "INSERT INTO jobs VALUES (?, 'pending', ?, NULL, ?, ?, NULL)",
-            (job_id, datetime.utcnow().isoformat(), in_path, out_path),
+            (job_id, datetime.now(UTC).isoformat(), str(in_path), str(out_path)),
         )
         conn.commit()
-
     background_tasks.add_task(run_job, job_id, settings, client)
     return JSONResponse({"job_id": job_id})
 
 
 @app.get("/status/{job_id}")
-async def get_status(job_id: str, settings: Settings = Depends(get_settings)):
+async def get_status(job_id: str, settings: Settings = None) -> dict:
+    """Get the status of a job."""
+    if settings is None:
+        settings = get_settings()
     with sqlite3.connect(settings.database_url) as conn:
         row = conn.execute(
             "SELECT status, created_at, completed_at, error FROM jobs WHERE id=?",
@@ -273,34 +275,34 @@ async def get_status(job_id: str, settings: Settings = Depends(get_settings)):
         ).fetchone()
     if not row:
         raise HTTPException(404, "Job not found")
-    return dict(row)
+    return dict(zip(["status", "created_at", "completed_at", "error"], row, strict=False))
 
 
 @app.get("/download/{job_id}")
-async def download(job_id: str, settings: Settings = Depends(get_settings)):
+async def download(job_id: str, settings: Settings = None) -> StreamingResponse:
+    """Download the normalized CSV for a completed job."""
+    if settings is None:
+        settings = get_settings()
     with sqlite3.connect(settings.database_url) as conn:
-        row = conn.execute(
-            "SELECT status, output_path FROM jobs WHERE id=?", (job_id,)
-        ).fetchone()
+        row = conn.execute("SELECT status, output_path FROM jobs WHERE id=?", (job_id,)).fetchone()
     if not row:
         raise HTTPException(404, "Job not found")
     status_val, out_path = row
+    out_path = Path(out_path)
     if status_val != "completed":
         raise HTTPException(400, "Job not completed")
-    if not os.path.exists(out_path):
+    if not out_path.exists():
         raise HTTPException(404, "Output file missing")
-
     return StreamingResponse(
-        open(out_path, "rb"),
+        out_path.open("rb"),
         media_type="text/csv",
-        headers={
-            "Content-Disposition": f"attachment; filename=normalized_{job_id}.csv"
-        },
+        headers={"Content-Disposition": f"attachment; filename=normalized_{job_id}.csv"},
     )
 
 
 @app.get("/health")
-async def health():
+async def health() -> dict:
+    """Health check endpoint."""
     return {"status": "ok"}
 
 
@@ -309,6 +311,4 @@ if __name__ == "__main__":
     import uvicorn
 
     settings = get_settings()
-    uvicorn.run(
-        "main:app", host=settings.server_host, port=settings.server_port, reload=True
-    )
+    uvicorn.run("main:app", host=settings.server_host, port=settings.server_port, reload=True)
