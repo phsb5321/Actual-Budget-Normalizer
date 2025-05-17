@@ -2,6 +2,7 @@
 
 import logging
 import sqlite3
+import sys
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -10,6 +11,13 @@ from scalar_fastapi import get_scalar_api_reference
 
 from app.api.routes import router
 from app.core.settings import get_settings
+
+# Ensure the project root is in sys.path for 'uv run app/main.py' or 'python app/main.py'
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+APP_DIR = Path(__file__).resolve().parent
+for p in [str(PROJECT_ROOT), str(APP_DIR)]:
+    if p not in sys.path:
+        sys.path.insert(0, p)
 
 
 # --- Logging Setup ---

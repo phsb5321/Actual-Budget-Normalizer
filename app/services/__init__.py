@@ -1,3 +1,3 @@
 """Services package: provides file I/O and related service utilities."""
 
-from .file_service import FileService  # noqa: F401
+# No FileService class to import; only utility functions exist in file_service.py
