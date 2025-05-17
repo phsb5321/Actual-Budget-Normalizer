@@ -1,4 +1,7 @@
-"""Base agent abstraction for transaction normalization agents."""
+"""Base agent abstraction for transaction normalization agents.
+
+This module defines the abstract base class for all transaction normalization agents, enforcing a standard interface for parsing and normalizing transaction data.
+"""
 
 from abc import ABC, abstractmethod
 

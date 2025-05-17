@@ -1,4 +1,7 @@
-"""Agent registry for managing agent types and instances."""
+"""Agent registry for managing agent types and instances.
+
+This module provides a registry for agent classes, allowing dynamic registration and retrieval of agent implementations by name. Useful for extensibility and agent selection.
+"""
 
 from typing import ClassVar
 

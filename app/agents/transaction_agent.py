@@ -1,4 +1,7 @@
-"""TransactionAgent: Main agent logic for transaction normalization using LLMs."""
+"""TransactionAgent: Main agent logic for transaction normalization using LLMs.
+
+This module defines the TransactionAgent class, which uses a language model (LLM) to parse and normalize bank transaction data. The agent takes raw transaction rows and produces structured Transaction objects, leveraging the LLM for reasoning and field extraction.
+"""
 
 import json
 

@@ -1,4 +1,7 @@
-"""FastAPI dependencies for DI (settings, DB, agent, etc)."""
+"""FastAPI dependencies for DI (settings, DB, agent, etc).
+
+This module provides dependency injection helpers for settings, database connections, and agent instantiation, enabling modular and testable API endpoints.
+"""
 
 from groq import Groq
 

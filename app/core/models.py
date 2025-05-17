@@ -1,4 +1,7 @@
-"""Pydantic models and DB models for the Actual Budget Normalizer."""
+"""Pydantic models and DB models for the Actual Budget Normalizer.
+
+This module defines the main Pydantic models used throughout the application, including the Transaction and JobStatus models for normalized transaction data and job tracking.
+"""
 
 from pydantic import BaseModel
 

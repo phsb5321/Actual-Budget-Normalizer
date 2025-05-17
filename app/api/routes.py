@@ -1,11 +1,13 @@
-"""FastAPI endpoints for the Actual Budget Normalizer API."""
+"""FastAPI endpoints for the Actual Budget Normalizer API.
+
+This module defines the main API routes for uploading CSV files, checking job status, downloading normalized results, and health checks. It wires together the agent, file service, and job runner components.
+"""
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.agents.transaction_agent import TransactionAgent
 from app.api.dependencies import get_agent, get_db_conn, get_settings
-from app.core.settings import Settings
 from app.services.file_service import save_upload_file, stream_csv_file
 from app.workers.job_runner import run_job
 
@@ -14,15 +16,13 @@ router = APIRouter()
 
 @router.post("/upload-csv", status_code=202)
 async def upload_csv(
-    background_tasks: BackgroundTasks,
-    file: UploadFile,
-    agent: TransactionAgent = Depends(get_agent),
-    settings: Settings = Depends(get_settings),
+    background_tasks: BackgroundTasks, file: UploadFile, agent: TransactionAgent = Depends(get_agent)
 ) -> JSONResponse:
     """Upload a CSV file and start a normalization job."""
     if not file.filename.lower().endswith(".csv"):
         raise HTTPException(400, "Only CSV files accepted")
     job_id, in_path, out_path = save_upload_file(file)
+    settings = get_settings()  # Only used internally, not as a parameter
     background_tasks.add_task(run_job, job_id, in_path, out_path, agent, settings)
     return JSONResponse({"job_id": job_id})
 
