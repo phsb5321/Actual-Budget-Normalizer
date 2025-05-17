@@ -26,8 +26,6 @@ wheels/
 MANIFEST
 
 # PyInstaller
-#  Usually these files are written by a python script from a template
-#  before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
 
@@ -145,5 +143,12 @@ uv.lock
 # Ignore processing files
 jobs/
 *.db
+logs/
+
+# Test artifacts
+/tests/__pycache__/
+/tests/*.pyc
+/tests/*.pyo
+/tests/*.pyd
 
 # End of file
