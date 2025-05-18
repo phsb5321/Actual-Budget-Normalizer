@@ -66,7 +66,23 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     yield
 
 
-app = FastAPI(lifespan=lifespan)
+app = FastAPI(
+    lifespan=lifespan,
+    docs_url="/docs",
+    redoc_url="/redoc",
+    title="Actual Budget Normalizer API",
+    description="""
+    The Actual Budget Normalizer API provides endpoints to upload, normalize, and download bank transaction CSV files using LLM-powered categorization.
+
+    **Endpoints:**
+    - `POST /upload-csv`: Upload a CSV file and start a normalization job. Returns a `job_id`.
+    - `GET /status/{{job_id}}`: Check the status of a normalization job.
+    - `GET /download/{{job_id}}`: Download the normalized CSV for a completed job.
+    - `GET /health`: Health check endpoint.
+    - `GET /scalar`: Interactive Scalar OpenAPI documentation.
+    """,
+    version="1.0.0",
+)
 app.include_router(router)
 
 

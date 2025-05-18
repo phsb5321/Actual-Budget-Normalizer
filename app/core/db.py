@@ -6,7 +6,7 @@ from typing import Any
 
 def get_db(db_path: str) -> "DBHelper":
     """Get a DBHelper instance for the given database path."""
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return DBHelper(conn)
 
