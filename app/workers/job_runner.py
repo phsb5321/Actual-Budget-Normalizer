@@ -1,5 +1,6 @@
 """Background job orchestration for transaction normalization."""
 
+import io
 import json
 import sqlite3
 from pathlib import Path
@@ -9,60 +10,80 @@ import pandas as pd
 from app.agents.transaction_agent import TransactionAgent
 from app.core.settings import Settings
 from app.core.utils import get_logger, utcnow_iso
+from app.services.file_service import FileService
+from app.services.s3_file_service import S3FileService
 
 logger = get_logger("bank-normalizer.worker")
 
 MAX_ROW_LOG_LEN = 300
 
 
-def run_job(job_id: str, in_path: Path, out_path: Path, agent: TransactionAgent, settings: Settings) -> None:
-    """Run a background job to normalize transactions using the provided agent."""
-    logger.info(f"Starting job: {job_id}, input: {in_path}, output: {out_path}")
-    with sqlite3.connect(settings.database_url) as conn:
-        cur = conn.cursor()
-        cur.execute("UPDATE jobs SET status='in_progress' WHERE id=?", (job_id,))
-        conn.commit()
-        try:
-            logger.info(f"Reading CSV: {in_path}")
-            data_frame = pd.read_csv(in_path, parse_dates=["Data"], dayfirst=True)
-            logger.info(f"Loaded {len(data_frame)} rows from {in_path}")
-            cats_path = Path(settings.categories_file)
-            pays_path = Path(settings.payees_file)
-            cats = json.load(cats_path.open()) if cats_path.exists() else []
-            pays = json.load(pays_path.open()) if pays_path.exists() else []
-            results = []
-            for idx, record in enumerate(data_frame.to_dict(orient="records")):
-                # Log the raw CSV row as a string (truncate if too long)
-                raw_row_str = str(record)
-                if len(raw_row_str) > MAX_ROW_LOG_LEN:
-                    raw_row_str = raw_row_str[: MAX_ROW_LOG_LEN - 3] + "..."
-                logger.info(f"[AI ROW {idx + 1}/{len(data_frame)}] Raw CSV: {raw_row_str}")
-                logger.info(f"[AI ROW {idx + 1}/{len(data_frame)}] Processing...")
-                try:
-                    txn = agent.parse_transaction(record, cats, pays, row_index=idx + 1, total_rows=len(data_frame))
-                except Exception:
-                    logger.exception(f"[AI ROW {idx + 1}/{len(data_frame)}] Failed to normalize: {record}")
-                    raise
-                if txn.category and txn.category not in cats:
-                    cats.append(txn.category)
-                if txn.payee and txn.payee not in pays:
-                    pays.append(txn.payee)
-                results.append(txn.dict())
-            logger.info(f"Writing updated categories to {cats_path}")
-            json.dump(cats, cats_path.open("w"), indent=2)
-            logger.info(f"Writing updated payees to {pays_path}")
-            json.dump(pays, pays_path.open("w"), indent=2)
-            logger.info(f"Writing normalized CSV to {out_path}")
-            pd.DataFrame(results).to_csv(out_path, index=False)
-            logger.info(f"Wrote normalized CSV to {out_path}")
-            cur.execute(
-                "UPDATE jobs SET status='completed', completed_at=? WHERE id=?",
-                (utcnow_iso(), job_id),
-            )
-        except Exception as exc:
-            logger.exception(f"Error processing job {job_id}")
-            cur.execute(
-                "UPDATE jobs SET status='error', completed_at=?, error=? WHERE id=?",
-                (utcnow_iso(), str(exc), job_id),
-            )
-        conn.commit()
+class JobRunner:
+    """JobRunner executes jobs using S3-backed file storage."""
+
+    def __init__(self) -> None:
+        """Initialize JobRunner with S3 and FileService."""
+        self.s3_service = S3FileService()
+        self.file_service = FileService(self.s3_service)
+
+    def run_job(
+        self, job_id: str, input_key: str, output_key: str, agent: TransactionAgent, settings: Settings
+    ) -> None:
+        """Run a background job to normalize transactions using the provided agent."""
+        logger.info(f"Starting job: {job_id}, input: {input_key}, output: {output_key}")
+        with sqlite3.connect(settings.database_url) as conn:
+            cur = conn.cursor()
+            cur.execute("UPDATE jobs SET status='in_progress' WHERE id=?", (job_id,))
+            conn.commit()
+            try:
+                logger.info(f"Downloading input from S3: {input_key}")
+                input_data = self.file_service.get_file(input_key)
+                data_frame = pd.read_csv(io.BytesIO(input_data), parse_dates=["Data"], dayfirst=True)
+                logger.info(f"Loaded {len(data_frame)} rows from {input_key}")
+                cats_path = Path(settings.categories_file)
+                pays_path = Path(settings.payees_file)
+                cats = json.load(cats_path.open()) if cats_path.exists() else []
+                pays = json.load(pays_path.open()) if pays_path.exists() else []
+                results = []
+                for idx, record in enumerate(data_frame.to_dict(orient="records")):
+                    # Log the raw CSV row as a string (truncate if too long)
+                    raw_row_str = str(record)
+                    if len(raw_row_str) > MAX_ROW_LOG_LEN:
+                        raw_row_str = raw_row_str[: MAX_ROW_LOG_LEN - 3] + "..."
+                    logger.info(f"[AI ROW {idx + 1}/{len(data_frame)}] Raw CSV: {raw_row_str}")
+                    logger.info(f"[AI ROW {idx + 1}/{len(data_frame)}] Processing...")
+                    try:
+                        txn = agent.parse_transaction(record, cats, pays, row_index=idx + 1, total_rows=len(data_frame))
+                    except Exception:
+                        logger.exception(f"[AI ROW {idx + 1}/{len(data_frame)}] Failed to normalize: {record}")
+                        raise
+                    if txn.category and txn.category not in cats:
+                        cats.append(txn.category)
+                    if txn.payee and txn.payee not in pays:
+                        pays.append(txn.payee)
+                    results.append(txn.dict())
+                logger.info(f"Writing updated categories to {cats_path}")
+                json.dump(cats, cats_path.open("w"), indent=2)
+                logger.info(f"Writing updated payees to {pays_path}")
+                json.dump(pays, pays_path.open("w"), indent=2)
+                logger.info(f"Uploading normalized CSV to S3: {output_key}")
+                output_data = pd.DataFrame(results).to_csv(index=False)
+                self.file_service.save_file(output_key, output_data)
+                logger.info(f"Uploaded normalized CSV to {output_key}")
+                cur.execute(
+                    "UPDATE jobs SET status='completed', completed_at=? WHERE id=?",
+                    (utcnow_iso(), job_id),
+                )
+            except Exception as exc:
+                logger.exception(f"Error processing job {job_id}")
+                cur.execute(
+                    "UPDATE jobs SET status='error', completed_at=?, error=? WHERE id=?",
+                    (utcnow_iso(), str(exc), job_id),
+                )
+            conn.commit()
+
+
+def run_job(job_id: str, input_key: str, output_key: str, agent: TransactionAgent, settings: Settings) -> None:
+    """Top-level function to run a job using JobRunner (for background tasks)."""
+    runner = JobRunner()
+    runner.run_job(job_id, input_key, output_key, agent, settings)

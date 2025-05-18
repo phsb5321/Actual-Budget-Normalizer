@@ -3,19 +3,24 @@
 This module defines the main API routes for uploading CSV files, checking job status, downloading normalized results, and health checks. It wires together the agent, file service, and job runner components.
 """
 
-from pathlib import Path
+import io
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from app.api.dependencies import get_agent, get_db_conn, get_settings
 from app.core.models import JobStatus
 from app.core.utils import get_logger
-from app.services.file_service import save_upload_file, stream_csv_file
+from app.services.file_service import FileService, save_upload_file
+from app.services.s3_file_service import S3FileService
 from app.workers.job_runner import run_job
 
 router = APIRouter()
 logger = get_logger("bank-normalizer.api")
+
+# S3FileService and FileService initialization
+s3_service = S3FileService()
+file_service = FileService(s3_service)
 
 
 @router.post(
@@ -58,18 +63,18 @@ async def upload_csv(
         logger.warning(f"Rejected file (not CSV): {file.filename}")
         raise HTTPException(400, "Only CSV files accepted")
     try:
-        job_id, in_path, out_path = save_upload_file(file)
-        logger.info(f"Saved upload: job_id={job_id}, in_path={in_path}, out_path={out_path}")
-        settings = get_settings()  # Only used internally, not as a parameter
+        job_id, in_key, out_key = save_upload_file(file)
+        logger.info(f"Saved upload: job_id={job_id}, in_key={in_key}, out_key={out_key}")
+        settings = get_settings()
         db = get_db_conn()
         from app.core.utils import utcnow_iso
 
         db.conn.execute(
             "INSERT INTO jobs (id, status, created_at, input_path, output_path) VALUES (?, ?, ?, ?, ?)",
-            (job_id, "pending", utcnow_iso(), str(in_path), str(out_path)),
+            (job_id, "pending", utcnow_iso(), in_key, out_key),
         )
         db.conn.commit()
-        background_tasks.add_task(run_job, job_id, in_path, out_path, agent, settings)
+        background_tasks.add_task(run_job, job_id, in_key, out_key, agent, settings)
         logger.info(f"Background job started: job_id={job_id}")
         return JSONResponse({"job_id": job_id})
     except Exception:
@@ -140,11 +145,19 @@ async def get_status(job_id: str, db: object = Depends(get_db_conn)) -> dict:
     },
 )
 async def download(job_id: str, db: object = Depends(get_db_conn)) -> StreamingResponse:
-    """Download the normalized CSV for a completed job."""
-    out_path = db.get_job_output_path(job_id)
-    if not out_path:
+    """Download the normalized CSV for a completed job from S3."""
+    out_key = db.get_job_output_path(job_id)
+    if not out_key:
         raise HTTPException(404, "Job not found")
-    return stream_csv_file(Path(out_path), job_id)
+    try:
+        data = file_service.get_file(out_key)
+    except Exception as exc:
+        raise HTTPException(404, "Output file missing in S3") from exc
+    return StreamingResponse(
+        io.BytesIO(data),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename=normalized_{job_id}.csv"},
+    )
 
 
 @router.get(
@@ -157,3 +170,26 @@ async def download(job_id: str, db: object = Depends(get_db_conn)) -> StreamingR
 async def health() -> dict:
     """Health check endpoint."""
     return {"status": "ok"}
+
+
+@router.post("/upload/")
+async def upload_file(file: UploadFile = None) -> dict:
+    """Upload a file to S3 and return its key."""
+    if file is None:
+        from fastapi import File
+
+        file = File(...)
+    data = await file.read()
+    key = f"uploads/{file.filename}"
+    file_service.save_file(key, data)
+    return {"key": key}
+
+
+@router.get("/download/{key:path}")
+async def download_file(key: str) -> Response:
+    """Download a file from S3 by key."""
+    try:
+        data = file_service.get_file(key)
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail="File not found") from exc
+    return Response(content=data, media_type="application/octet-stream")
