@@ -60,12 +60,31 @@ class TransactionAgent:
         row_index: int | None = None,
         total_rows: int | None = None,
     ) -> Transaction:
-        """Use the LLM to parse and normalize a transaction row, with DB category lookup."""
+        """Use the LLM to parse and normalize a transaction row, with DB category lookup and update."""
         payee = str(row.get("payee", "")).upper()
         db_category = self.lookup_category_in_db(payee)
         if db_category:
+            logger.info(f"Category for payee '{payee}' found in DB: '{db_category}'")
             row["category"] = db_category
-        return self._parse_transaction(row, categories, payees, row_index, total_rows)
+        else:
+            logger.info(f"No DB category for payee '{payee}'. Using LLM to assign category.")
+        txn = self._parse_transaction(row, categories, payees, row_index, total_rows)
+        # After LLM assignment, if new category, update DB
+        if not db_category and txn.category:
+            self.add_category_to_db(payee, txn.category)
+            logger.info(f"Added new payee-category to DB: '{payee}' -> '{txn.category}'")
+        return txn
+
+    def add_category_to_db(self, payee: str, category: str) -> None:
+        """Add a new payee-category pair to the database if it does not already exist."""
+        session: Session = SessionLocal()
+        # Avoid duplicates
+        exists = session.query(Category).filter(Category.payee == payee).first()
+        if not exists:
+            obj = Category(payee=payee, category=category)
+            session.add(obj)
+            session.commit()
+        session.close()
 
     def _parse_transaction(
         self,
