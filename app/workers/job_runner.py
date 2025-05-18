@@ -2,10 +2,11 @@
 
 import io
 import json
-import sqlite3
 from pathlib import Path
 
 import pandas as pd
+from sqlalchemy import Column, MetaData, String, Table, Text, create_engine, update
+from sqlalchemy.orm import sessionmaker
 
 from app.agents.transaction_agent import TransactionAgent
 from app.core.settings import Settings
@@ -25,16 +26,35 @@ class JobRunner:
         """Initialize JobRunner with S3 and FileService."""
         self.s3_service = S3FileService()
         self.file_service = FileService(self.s3_service)
+        # Set up SQLAlchemy for jobs table
+        from app.core.settings import get_settings
+
+        self.engine = create_engine(get_settings().database_url)
+        self.Session = sessionmaker(bind=self.engine)
+        self.metadata = MetaData()
+        self.jobs_table = Table(
+            "jobs",
+            self.metadata,
+            Column("id", String, primary_key=True),
+            Column("status", String, nullable=False),
+            Column("created_at", String, nullable=False),
+            Column("completed_at", String, nullable=True),
+            Column("input_path", String, nullable=False),
+            Column("output_path", String, nullable=False),
+            Column("error", Text, nullable=True),
+        )
 
     def run_job(
         self, job_id: str, input_key: str, output_key: str, agent: TransactionAgent, settings: Settings
     ) -> None:
         """Run a background job to normalize transactions using the provided agent."""
         logger.info(f"Starting job: {job_id}, input: {input_key}, output: {output_key}")
-        with sqlite3.connect(settings.database_url) as conn:
-            cur = conn.cursor()
-            cur.execute("UPDATE jobs SET status='in_progress' WHERE id=?", (job_id,))
-            conn.commit()
+        session = self.Session()
+        try:
+            # Update job status to in_progress
+            stmt = update(self.jobs_table).where(self.jobs_table.c.id == job_id).values(status="in_progress")
+            session.execute(stmt)
+            session.commit()
             try:
                 logger.info(f"Downloading input from S3: {input_key}")
                 input_data = self.file_service.get_file(input_key)
@@ -70,17 +90,23 @@ class JobRunner:
                 output_data = pd.DataFrame(results).to_csv(index=False)
                 self.file_service.save_file(output_key, output_data)
                 logger.info(f"Uploaded normalized CSV to {output_key}")
-                cur.execute(
-                    "UPDATE jobs SET status='completed', completed_at=? WHERE id=?",
-                    (utcnow_iso(), job_id),
+                stmt = (
+                    update(self.jobs_table)
+                    .where(self.jobs_table.c.id == job_id)
+                    .values(status="completed", completed_at=utcnow_iso())
                 )
+                session.execute(stmt)
             except Exception as exc:
                 logger.exception(f"Error processing job {job_id}")
-                cur.execute(
-                    "UPDATE jobs SET status='error', completed_at=?, error=? WHERE id=?",
-                    (utcnow_iso(), str(exc), job_id),
+                stmt = (
+                    update(self.jobs_table)
+                    .where(self.jobs_table.c.id == job_id)
+                    .values(status="error", completed_at=utcnow_iso(), error=str(exc))
                 )
-            conn.commit()
+                session.execute(stmt)
+            session.commit()
+        finally:
+            session.close()
 
 
 def run_job(job_id: str, input_key: str, output_key: str, agent: TransactionAgent, settings: Settings) -> None:

@@ -7,6 +7,7 @@ import io
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from sqlalchemy import insert
 
 from app.api.dependencies import get_agent, get_db_conn, get_settings
 from app.core.models import JobStatus
@@ -69,11 +70,16 @@ async def upload_csv(
         db = get_db_conn()
         from app.core.utils import utcnow_iso
 
-        db.conn.execute(
-            "INSERT INTO jobs (id, status, created_at, input_path, output_path) VALUES (?, ?, ?, ?, ?)",
-            (job_id, "pending", utcnow_iso(), in_key, out_key),
+        # Insert job using SQLAlchemy
+        stmt = insert(db.jobs_table).values(
+            id=job_id,
+            status="pending",
+            created_at=utcnow_iso(),
+            input_path=in_key,
+            output_path=out_key,
         )
-        db.conn.commit()
+        db.session.execute(stmt)
+        db.session.commit()
         background_tasks.add_task(run_job, job_id, in_key, out_key, agent, settings)
         logger.info(f"Background job started: job_id={job_id}")
         return JSONResponse({"job_id": job_id})

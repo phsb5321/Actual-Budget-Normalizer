@@ -15,7 +15,7 @@ RUN pip install --upgrade pip setuptools wheel
 # Copy only pyproject.toml and README for dependency install
 COPY pyproject.toml README.md ./
 
-# Install dependencies in builder
+# Install Python dependencies (including Postgres/ORM) via pyproject.toml
 RUN pip install --user .
 
 # Copy the rest of the code

@@ -19,5 +19,4 @@ def get_agent() -> TransactionAgent:
 
 def get_db_conn() -> object:
     """Provide a database connection helper for dependency injection."""
-    settings = get_settings()
-    return get_db(settings.database_url)
+    return get_db()

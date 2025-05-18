@@ -4,7 +4,6 @@ This module initializes the FastAPI application, configures logging, sets up the
 """
 
 import logging
-import sqlite3
 import sys
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -13,8 +12,11 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from scalar_fastapi import get_scalar_api_reference
+from sqlalchemy import Column, MetaData, String, Table, Text, create_engine
+from sqlalchemy.exc import ProgrammingError
 
 from app.api.routes import router
+from app.core.db import Base
 from app.core.settings import get_settings
 from app.core.utils import get_logger
 
@@ -46,22 +48,30 @@ setup_logging()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """Lifespan event handler to initialize the jobs database and ensure the jobs table exists."""
+    """Lifespan event handler to initialize the jobs and categories tables using SQLAlchemy (PostgreSQL compatible)."""
     _ = app  # Silence unused argument warning
     Path("jobs").mkdir(parents=True, exist_ok=True)
     settings = get_settings()
-    with sqlite3.connect(settings.database_url) as conn:
-        conn.execute(
-            """CREATE TABLE IF NOT EXISTS jobs (
-                id TEXT PRIMARY KEY,
-                status TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                completed_at TEXT,
-                input_path TEXT NOT NULL,
-                output_path TEXT NOT NULL,
-                error TEXT
-            )"""
-        )
+    engine = create_engine(settings.database_url)
+    metadata = MetaData()
+    jobs_table = Table(
+        "jobs",
+        metadata,
+        Column("id", String, primary_key=True),
+        Column("status", String, nullable=False),
+        Column("created_at", String, nullable=False),
+        Column("completed_at", String, nullable=True),
+        Column("input_path", String, nullable=False),
+        Column("output_path", String, nullable=False),
+        Column("error", Text, nullable=True),
+    )
+    try:
+        metadata.create_all(engine, tables=[jobs_table])
+        # Also create categories table using ORM
+        Base.metadata.create_all(engine)
+    except ProgrammingError as exc:
+        print(f"Failed to create jobs or categories table: {exc}")
+        raise
     yield
 
 

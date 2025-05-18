@@ -10,7 +10,10 @@ import string
 import unicodedata
 from io import StringIO
 
+from sqlalchemy.orm import Session
+
 from app.agents.prompts import SYSTEM_PROMPT, USER_PROMPT_LOG_LABEL, USER_PROMPT_TEMPLATE
+from app.core.db import Category, SessionLocal
 from app.core.models import Transaction
 from app.core.settings import Settings
 from app.core.utils import get_logger
@@ -39,7 +42,32 @@ class TransactionAgent:
         self.llm_client = llm_client
         self.settings = settings
 
+    def lookup_category_in_db(self, payee: str) -> str | None:
+        """Look up a category for a payee in the Postgres DB (case-insensitive, partial match)."""
+        session: Session = SessionLocal()
+        payee_upper = payee.upper()
+        category_obj = session.query(Category).filter(Category.payee.ilike(f"%{payee_upper}%")).first()
+        session.close()
+        if category_obj:
+            return category_obj.category.upper()
+        return None
+
     def parse_transaction(
+        self,
+        row: dict,
+        categories: list[str],
+        payees: list[str],
+        row_index: int | None = None,
+        total_rows: int | None = None,
+    ) -> Transaction:
+        """Use the LLM to parse and normalize a transaction row, with DB category lookup."""
+        payee = str(row.get("payee", "")).upper()
+        db_category = self.lookup_category_in_db(payee)
+        if db_category:
+            row["category"] = db_category
+        return self._parse_transaction(row, categories, payees, row_index, total_rows)
+
+    def _parse_transaction(
         self,
         row: dict,
         categories: list[str],

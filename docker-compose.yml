@@ -7,7 +7,7 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - DATABASE_URL=/app/jobs.db
+      - DATABASE_URL=postgresql+psycopg2://postgres:postgres@db:5432/actualbudget
       - CATEGORIES_FILE=/app/categories.json
       - PAYEES_FILE=/app/payees.json
       - S3_ENDPOINT_URL=http://minio:9000
@@ -16,7 +16,21 @@ services:
       - S3_BUCKET=actual-bucket
       - GROQ_API_KEY=${GROQ_API_KEY}
     depends_on:
+      - db
       - minio
+    restart: unless-stopped
+
+  db:
+    image: postgres:16
+    container_name: actual-budget-normalizer-db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: actualbudget
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
     restart: unless-stopped
 
   minio:
@@ -30,3 +44,6 @@ services:
       MINIO_ROOT_PASSWORD: minioadmin
     command: server /data --console-address ":9001"
     restart: unless-stopped
+
+volumes:
+  pgdata:
