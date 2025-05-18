@@ -16,6 +16,7 @@ from scalar_fastapi import get_scalar_api_reference
 
 from app.api.routes import router
 from app.core.settings import get_settings
+from app.core.utils import get_logger
 
 # Ensure the project root is in sys.path for 'uv run app/main.py' or 'python app/main.py'
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -29,16 +30,14 @@ for p in [str(PROJECT_ROOT), str(APP_DIR)]:
 def setup_logging() -> None:
     """Configure logging to file and console, and ensure jobs directory exists."""
     Path("jobs").mkdir(parents=True, exist_ok=True)
-    logger = logging.getLogger("bank-normalizer")
+    logger = get_logger("bank-normalizer")
     logger.setLevel(logging.INFO)
-    if not logger.handlers:
+    # Add file handler for persistent logs (not colorized)
+    if not any(isinstance(h, logging.FileHandler) for h in logger.handlers):
         file_handler = logging.FileHandler("jobs/ai_processing.log")
         file_handler.setLevel(logging.INFO)
         file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
         logger.addHandler(file_handler)
-        stream_handler = logging.StreamHandler()
-        stream_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
-        logger.addHandler(stream_handler)
     logger.propagate = False
 
 

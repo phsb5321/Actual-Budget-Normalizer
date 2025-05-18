@@ -4,13 +4,26 @@ import logging
 from datetime import UTC, datetime
 from pathlib import Path
 
+import colorlog
+
 
 def get_logger(name: str) -> logging.Logger:
-    """Get a logger with a standard format for the project."""
+    """Get a logger with a colorized format for the project."""
     logger = logging.getLogger(name)
     if not logger.handlers:
         handler = logging.StreamHandler()
-        handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+        formatter = colorlog.ColoredFormatter(
+            "%(log_color)s%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+            log_colors={
+                "DEBUG": "cyan",
+                "INFO": "green",
+                "WARNING": "yellow",
+                "ERROR": "red",
+                "CRITICAL": "bold_red",
+            },
+        )
+        handler.setFormatter(formatter)
         logger.addHandler(handler)
     logger.propagate = False
     return logger

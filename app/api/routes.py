@@ -3,7 +3,6 @@
 This module defines the main API routes for uploading CSV files, checking job status, downloading normalized results, and health checks. It wires together the agent, file service, and job runner components.
 """
 
-import logging
 from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile
@@ -11,11 +10,12 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from app.api.dependencies import get_agent, get_db_conn, get_settings
 from app.core.models import JobStatus
+from app.core.utils import get_logger
 from app.services.file_service import save_upload_file, stream_csv_file
 from app.workers.job_runner import run_job
 
 router = APIRouter()
-logger = logging.getLogger("bank-normalizer")
+logger = get_logger("bank-normalizer.api")
 
 
 @router.post(
