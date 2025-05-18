@@ -6,6 +6,8 @@ This module defines the TransactionAgent class, which uses a language model (LLM
 import csv
 import json
 import re
+import string
+import unicodedata
 from io import StringIO
 
 from app.agents.prompts import SYSTEM_PROMPT, USER_PROMPT_LOG_LABEL, USER_PROMPT_TEMPLATE
@@ -115,8 +117,20 @@ class TransactionAgent:
                     msg = f"Missing field '{field}' in LLM JSON output: {data}"
                     logger.exception(f"{yellow}{row_info}AGENT: {msg}{reset}")
                     raise ValueError(msg) from None
+            # Defensive: ensure notes and category are strings (not None)
             data["notes"] = data["notes"] if data["notes"] is not None else ""
             data["category"] = data["category"] if data["category"] is not None else ""
+            # Enforce upper-case and remove special characters for all string fields
+            for key in ["date", "payee", "notes", "category"]:
+                value = data[key]
+                if not isinstance(value, str):
+                    value = str(value)
+                # Remove accents and special characters, keep only A-Z, 0-9, and spaces
+                value = unicodedata.normalize("NFKD", value)
+                value = value.encode("ASCII", "ignore").decode()
+                value = value.upper()
+                value = "".join(c for c in value if c in string.ascii_uppercase + string.digits + " ")
+                data[key] = value
             try:
                 data["amount"] = float(data["amount"])
             except Exception as exc:
