@@ -17,6 +17,7 @@ class Category(Base):
     id = Column(Integer, primary_key=True)
     payee = Column(String, unique=True, index=True)
     category = Column(String)
+    ai_notes = Column(String, nullable=True)  # New: AI-generated notes for this payee
 
 
 def get_engine() -> Engine:

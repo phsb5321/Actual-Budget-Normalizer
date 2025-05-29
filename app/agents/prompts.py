@@ -11,12 +11,16 @@ Your job is to extract and return ONLY a valid JSON object with the following fi
   - category (string, may be empty, upper case, no special characters)
   - amount (float, positive for credit, negative for debit)
 
-Category assignment rules:
+Category and notes assignment rules:
 - If a category is found in the database for the payee (case-insensitive, partial match allowed),
   ALWAYS use that category.
-- If no category is found in the database, use your best knowledge and reasoning to assign the most likely category.
-- Be consistent: always use the same category for the same payee.
-- If unsure, leave 'category' as an empty string.
+- If AI-generated notes are found in the database for the payee, use those notes.
+- If no category or notes are found in the database, use your best knowledge and reasoning to assign the most likely
+  category and generate a meaningful note.
+- For transfers or unknown payees, try to infer the relationship (e.g., family, business, salary, etc.) and provide a
+  contextually appropriate note and category.
+- Be consistent: always use the same category and note for the same payee.
+- If unsure, leave 'category' and 'notes' as empty strings.
 
 Other rules:
 - Output ONLY the JSON object, with no explanations, thoughts, commentary, or extra text.

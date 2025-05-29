@@ -67,7 +67,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     )
     try:
         metadata.create_all(engine, tables=[jobs_table])
-        # Also create categories table using ORM
+        # Also create categories table using ORM (with ai_notes)
         Base.metadata.create_all(engine)
     except ProgrammingError as exc:
         print(f"Failed to create jobs or categories table: {exc}")

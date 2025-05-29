@@ -1,5 +1,6 @@
 """Background job orchestration for transaction normalization."""
 
+import concurrent.futures
 import io
 import json
 from pathlib import Path
@@ -64,9 +65,11 @@ class JobRunner:
                 pays_path = Path(settings.payees_file)
                 cats = json.load(cats_path.open()) if cats_path.exists() else []
                 pays = json.load(pays_path.open()) if pays_path.exists() else []
-                results = []
-                for idx, record in enumerate(data_frame.to_dict(orient="records")):
-                    # Log the raw CSV row as a string (truncate if too long)
+                results = [None] * len(data_frame)
+                row_dicts = data_frame.to_dict(orient="records")
+
+                def process_row(idx_record: tuple[int, dict]) -> tuple[int, dict]:
+                    idx, record = idx_record
                     raw_row_str = str(record)
                     if len(raw_row_str) > MAX_ROW_LOG_LEN:
                         raw_row_str = raw_row_str[: MAX_ROW_LOG_LEN - 3] + "..."
@@ -81,7 +84,13 @@ class JobRunner:
                         cats.append(txn.category)
                     if txn.payee and txn.payee not in pays:
                         pays.append(txn.payee)
-                    results.append(txn.dict())
+                    return idx, txn.dict()
+
+                with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
+                    futures = [executor.submit(process_row, (idx, record)) for idx, record in enumerate(row_dicts)]
+                    for future in concurrent.futures.as_completed(futures):
+                        idx, txn_dict = future.result()
+                        results[idx] = txn_dict
                 logger.info(f"Writing updated categories to {cats_path}")
                 json.dump(cats, cats_path.open("w"), indent=2)
                 logger.info(f"Writing updated payees to {pays_path}")

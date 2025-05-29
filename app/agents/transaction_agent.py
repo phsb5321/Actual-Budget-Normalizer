@@ -52,6 +52,16 @@ class TransactionAgent:
             return category_obj.category.upper()
         return None
 
+    def lookup_notes_in_db(self, payee: str) -> str | None:
+        """Look up AI-generated notes for a payee in the DB (case-insensitive, partial match)."""
+        session: Session = SessionLocal()
+        payee_upper = payee.upper()
+        category_obj = session.query(Category).filter(Category.payee.ilike(f"%{payee_upper}%")).first()
+        session.close()
+        if category_obj and category_obj.ai_notes:
+            return category_obj.ai_notes
+        return None
+
     def parse_transaction(
         self,
         row: dict,
@@ -60,29 +70,47 @@ class TransactionAgent:
         row_index: int | None = None,
         total_rows: int | None = None,
     ) -> Transaction:
-        """Use the LLM to parse and normalize a transaction row, with DB category lookup and update."""
+        """Use the LLM to parse and normalize a transaction row, with DB category/notes lookup and update."""
         payee = str(row.get("payee", "")).upper()
         db_category = self.lookup_category_in_db(payee)
+        db_notes = self.lookup_notes_in_db(payee)
         if db_category:
             logger.info(f"Category for payee '{payee}' found in DB: '{db_category}'")
             row["category"] = db_category
         else:
             logger.info(f"No DB category for payee '{payee}'. Using LLM to assign category.")
+        if db_notes:
+            logger.info(f"AI notes for payee '{payee}' found in DB: '{db_notes}'")
+            row["notes"] = db_notes
+        else:
+            logger.info(f"No AI notes for payee '{payee}'. Using LLM to generate notes.")
         txn = self._parse_transaction(row, categories, payees, row_index, total_rows)
-        # After LLM assignment, if new category, update DB
+        # After LLM assignment, if new category or notes, update DB
         if not db_category and txn.category:
-            self.add_category_to_db(payee, txn.category)
-            logger.info(f"Added new payee-category to DB: '{payee}' -> '{txn.category}'")
+            self.add_category_to_db(payee, txn.category, txn.notes)
+            logger.info(f"Added new payee-category/notes to DB: '{payee}' -> '{txn.category}', notes: '{txn.notes}'")
+        elif not db_notes and txn.notes:
+            self.update_notes_in_db(payee, txn.notes)
+            logger.info(f"Added new AI notes to DB for payee '{payee}': '{txn.notes}'")
         return txn
 
-    def add_category_to_db(self, payee: str, category: str) -> None:
-        """Add a new payee-category pair to the database if it does not already exist."""
+    def add_category_to_db(self, payee: str, category: str, ai_notes: str | None = None) -> None:
+        """Add a new payee-category pair (and optional notes) to the database if it does not already exist."""
         session: Session = SessionLocal()
         # Avoid duplicates
         exists = session.query(Category).filter(Category.payee == payee).first()
         if not exists:
-            obj = Category(payee=payee, category=category)
+            obj = Category(payee=payee, category=category, ai_notes=ai_notes)
             session.add(obj)
+            session.commit()
+        session.close()
+
+    def update_notes_in_db(self, payee: str, ai_notes: str) -> None:
+        """Update or add AI-generated notes for a payee in the database."""
+        session: Session = SessionLocal()
+        obj = session.query(Category).filter(Category.payee == payee).first()
+        if obj:
+            obj.ai_notes = ai_notes
             session.commit()
         session.close()
 
